@@ -84,7 +84,7 @@ pip install .
 ```py
 import torch
 import torch.nn as nn
-from torchastic import Compass, StochasticAccumulator
+from torchastic import AdamW, StochasticAccumulator
 
 
 class Model(nn.Module):
@@ -93,7 +93,7 @@ class Model(nn.Module):
 
 # Init model
 model = Model(*model_args)
-optimizer = Compass(model.parameters(), lr=0.01, weight_decay=1e-2, amp_fac=5)
+optimizer = AdamW(model.parameters(), lr=0.01, weight_decay=1e-2)
 
 # Apply stochastic grad accumulator hooks
 StochasticAccumulator.assign_hooks(model)
