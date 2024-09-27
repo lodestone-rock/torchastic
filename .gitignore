@@ -1,3 +1,5 @@
 init.sh
 /.vscode
-
+build
+dist
+*.egg-info
