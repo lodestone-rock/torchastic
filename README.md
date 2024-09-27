@@ -1,5 +1,17 @@
 # torchastic
 stochastic bfloat16 based optimizer library
+
+## How to Install
+`pip install torchastic`
+
+## Build from Source
+```
+git clone https://github.com/lodestone-rock/torchastic/
+cd torchastic
+python setup.py sdist bdist_wheel
+pip install .
+```
+
 ## How to Use
 ```py
 import torch
