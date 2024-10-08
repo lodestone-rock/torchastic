@@ -93,6 +93,7 @@ class Model(nn.Module):
 
 # Init model
 model = Model(*model_args)
+model.to(torch.bfloat16)
 optimizer = AdamW(model.parameters(), lr=0.01, weight_decay=1e-2)
 
 # Apply stochastic grad accumulator hooks
