@@ -545,8 +545,11 @@ class StochasticAccumulator:
 
     @staticmethod
     def assign_hooks(model):
+        hooks = []
         for n, p in model.named_parameters():
             if p.requires_grad:
-                p.register_post_accumulate_grad_hook(
+                hook = p.register_post_accumulate_grad_hook(
                     StochasticAccumulator.stochastic_grad_accum
                 )
+                hooks.append(hook)
+        return hooks
