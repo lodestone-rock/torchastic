@@ -98,7 +98,7 @@ class Compass(Optimizer):
                 # State initialization
                 if len(state) == 0:
                     state["step"] = 0
-                    state["last_reset_step"] = 0
+                    state["last_reset_step"] = state["step"]
                     # Exponential moving average of gradient values
                     state["ema"] = torch.zeros_like(p.data, dtype=torch.bfloat16)
                     # Exponential moving average of squared gradient values
@@ -185,7 +185,6 @@ class Compass(Optimizer):
                 state = self.state[p]
                 if len(state) != 0:  # Only reset if state exists
                     state["last_reset_step"] = state["step"]  # Store when we last reset
-                    state["step"] = 0
                     state["ema"].zero_()
                     state["ema_squared"].zero_()
 
