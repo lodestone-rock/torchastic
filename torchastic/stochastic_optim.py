@@ -1,5 +1,8 @@
+import warnings
+
 import torch
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import _LRScheduler
 
 
 # @torch.compile
@@ -45,6 +48,10 @@ class Compass(Optimizer):
             Weight decay, i.e. a L2 penalty (default: 0).
         centralization (float):
             center model grad (default: 0).
+        reset_every (int, optional):
+            Reset the optimizer state every this many steps. If None, never reset.
+        cautious (bool):
+            Whether to apply cautious gradient updates (default: True).
     """
 
     def __init__(
@@ -56,6 +63,8 @@ class Compass(Optimizer):
         eps=1e-8,
         weight_decay=0,
         centralization=0,
+        reset_every=None,
+        cautious=True,
     ):
         defaults = dict(
             lr=lr,
@@ -64,6 +73,8 @@ class Compass(Optimizer):
             eps=eps,
             weight_decay=weight_decay,
             centralization=centralization,
+            reset_every=reset_every,
+            cautious=cautious,
         )
         super(Compass, self).__init__(params, defaults)
 
@@ -73,6 +84,7 @@ class Compass(Optimizer):
             loss = closure()
 
         for group in self.param_groups:
+            reset_every = group["reset_every"]
             for p in group["params"]:
                 assert p.dtype == torch.bfloat16, "only bfloat 16 is supported."
                 if p.grad is None:
@@ -86,6 +98,7 @@ class Compass(Optimizer):
                 # State initialization
                 if len(state) == 0:
                     state["step"] = 0
+                    state["last_reset_step"] = 0
                     # Exponential moving average of gradient values
                     state["ema"] = torch.zeros_like(p.data, dtype=torch.bfloat16)
                     # Exponential moving average of squared gradient values
@@ -106,6 +119,10 @@ class Compass(Optimizer):
                 centralization = group["centralization"]
                 state["step"] += 1
 
+                # Auto-reset if configured
+                if reset_every is not None and state["step"] % reset_every == 0:
+                    self.reset_state()
+
                 # center the gradient vector
                 if centralization != 0:
                     grad.sub_(
@@ -114,10 +131,10 @@ class Compass(Optimizer):
                         )
                     )
 
-                # bias correction step size
-                # soft warmup
-                bias_correction = 1 - beta1 ** state["step"]
-                bias_correction_sqrt = (1 - beta2 ** state["step"]) ** (1 / 2)
+                # bias correction step size using steps since last reset
+                steps_since_reset = state["step"] - state["last_reset_step"]
+                bias_correction = 1 - beta1**steps_since_reset
+                bias_correction_sqrt = (1 - beta2**steps_since_reset) ** (1 / 2)
                 step_size = lr / bias_correction
 
                 # Decay the first and second moment running average coefficient
@@ -136,8 +153,21 @@ class Compass(Optimizer):
                     # Perform stepweight decay
                     p_fp32.data.mul_(1 - step_size * weight_decay)
 
-                # p = p - lr * grad / denom
-                p_fp32.data.addcdiv_(grad, denom, value=-step_size)
+                # Compute the proposed update
+                if group["cautious"]:
+                    update = -step_size * (ema / denom)
+                    # Check if gradient agrees with update direction
+                    caution_mask = (update * grad > 0).to(grad.dtype)
+
+                    # Scale gradient where directions agree
+                    grad = grad * (
+                        1
+                        - caution_mask
+                        + caution_mask / (grad.abs().mean() + group["eps"])
+                    )
+
+                # Apply the update with cautious gradient
+                p_fp32.data.addcdiv_(ema, denom, value=-step_size)
 
                 # pack
                 copy_stochastic_(state["ema"], ema)
@@ -145,6 +175,19 @@ class Compass(Optimizer):
                 copy_stochastic_(p, p_fp32)
 
         return loss
+
+    def reset_state(self):
+        """Resets the optimizer state (step count, momentum, and adaptive
+        learning rate history).  Can be beneficial to call periodically (e.g.,
+        every 1000 steps) to clear accumulated traces for adaptive optimizers."""
+        for group in self.param_groups:
+            for p in group["params"]:
+                state = self.state[p]
+                if len(state) != 0:  # Only reset if state exists
+                    state["last_reset_step"] = state["step"]  # Store when we last reset
+                    state["step"] = 0
+                    state["ema"].zero_()
+                    state["ema_squared"].zero_()
 
 
 class LPFAdamW(Optimizer):
@@ -208,7 +251,6 @@ class LPFAdamW(Optimizer):
                 # State initialization
                 if len(state) == 0:
                     state["step"] = 0
-                    # Exponential moving average of gradient values
                     state["smoothing"] = torch.zeros_like(p.data, dtype=torch.bfloat16)
                     state["ema"] = torch.zeros_like(p.data, dtype=torch.bfloat16)
                     # Exponential moving average of squared gradient values
@@ -553,3 +595,78 @@ class StochasticAccumulator:
                 )
                 hooks.append(hook)
         return hooks
+
+
+class ResetWrapper(_LRScheduler):
+    """Wraps a base scheduler to add periodic linear warmups.
+
+    Args:
+        optimizer: Wrapped optimizer
+        warmup_steps: Number of steps for each warmup period
+        reset_every: Reset and warmup every this many steps
+        base_scheduler: Base learning rate scheduler to wrap
+        last_epoch: The index of last epoch (-1 by default)
+
+    Example:
+        >>> base_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+        >>> scheduler = ResetWrapper(
+        ...     optimizer,
+        ...     warmup_steps=100,
+        ...     reset_every=1000,
+        ...     base_scheduler=base_scheduler
+        ... )
+    """
+
+    def __init__(
+        self,
+        optimizer,
+        warmup_steps,
+        reset_every,
+        base_scheduler=None,
+        last_epoch=-1,
+    ):
+        self.warmup_steps = warmup_steps
+        self.reset_every = reset_every
+        self.base_scheduler = base_scheduler
+        self.last_reset = -1
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        steps_since_reset = self.last_epoch - self.last_reset
+
+        # Check if we need to reset
+        if (
+            self.reset_every
+            and self.last_epoch > 0
+            and self.last_epoch % self.reset_every == 0
+        ):
+            self.last_reset = self.last_epoch
+            steps_since_reset = 0
+
+        # Get target learning rates from base scheduler
+        if self.base_scheduler is None:
+            target_lrs = self.base_lrs
+        else:
+            target_lrs = self.base_scheduler.get_lr()
+
+        # Apply warmup if we're in a warmup period
+        if steps_since_reset < self.warmup_steps:
+            # Linear warmup from 0 to target_lr
+            warmup_factor = steps_since_reset / self.warmup_steps
+            return [lr * warmup_factor for lr in target_lrs]
+
+        return target_lrs
+
+    def step(self, epoch=None):
+        if epoch is None:
+            epoch = self.last_epoch + 1
+        self.last_epoch = epoch
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            learning_rates = self.get_lr()
+            if self.base_scheduler is not None:
+                self.base_scheduler.step(epoch)
+
+        for param_group, lr in zip(self.optimizer.param_groups, learning_rates):
+            param_group["lr"] = lr
