@@ -117,6 +117,7 @@ class Compass(Optimizer):
                 lr = group["lr"]
                 weight_decay = group["weight_decay"]
                 centralization = group["centralization"]
+                steps_since_reset = (state["step"] - state["last_reset_step"]) + 1
                 state["step"] += 1
 
                 # Auto-reset if configured
@@ -132,7 +133,6 @@ class Compass(Optimizer):
                     )
 
                 # bias correction step size using steps since last reset
-                steps_since_reset = state["step"] - state["last_reset_step"]
                 bias_correction = 1 - beta1**steps_since_reset
                 bias_correction_sqrt = (1 - beta2**steps_since_reset) ** (1 / 2)
                 step_size = lr / bias_correction
